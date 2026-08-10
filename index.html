@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tidegate</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; line-height: 1.5; color: #1b1b1b; }
+  h1 { margin-bottom: .2rem; }
+  p.sub { color: #555; margin-top: 0; }
+  pre { background: #0e1a24; color: #cfe3d0; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+  a { color: #1a6; }
+  code { background: #eee; padding: .1em .3em; border-radius: 3px; }
+</style>
+</head>
+<body>
+  <h1>Tidegate</h1>
+  <p class="sub">A personal, identity-anchored <strong>sealed balance</strong> — peg gold in and out of a
+  BlockTrail keyed to a <code>did:nostr</code>, so many apps share one trail.</p>
+
+  <p>This page runs the peg round-trip <strong>in your browser</strong>, importing the exact same
+  <code>tidegate.js</code> that Node tests — proving it's isomorphic and served statically from GitHub Pages.
+  Source: <a href="https://github.com/melvincarvalho/tidegate">github.com/melvincarvalho/tidegate</a>.</p>
+
+  <pre id="out">running…</pre>
+
+  <script type="module">
+    import { createTidegate } from './tidegate.js';
+    import { localBackend, localSigner } from './local.js';
+
+    const out = document.getElementById('out');
+    out.textContent = '';
+    const log = (s) => { out.textContent += s + '\n'; };
+
+    const did = 'did:nostr:npub1browserdemo';
+    const tg = createTidegate({ backend: localBackend(), signer: localSigner('npub1browserdemo') });
+
+    (async () => {
+      try {
+        log('balance          ' + await tg.balance(did));
+        await tg.pegIn(did, 1200);  log('pegIn  1200  ->  ' + await tg.balance(did));
+        await tg.pegIn(did, 300);   log('pegIn   300  ->  ' + await tg.balance(did));
+        await tg.pegOut(did, 500);  log('pegOut  500  ->  ' + await tg.balance(did));
+        await tg.pegOut(did, 1000); log('pegOut 1000  ->  ' + await tg.balance(did));
+        log('\n✓ round-trip ok — in the browser, from gh-pages, gold conserved.');
+      } catch (e) {
+        log('✗ ' + e.message);
+      }
+    })();
+  </script>
+</body>
+</html>
