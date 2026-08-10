@@ -62,10 +62,30 @@ owner's to keep, anywhere they control. So the store is pluggable:
 | `localStore()` | ✗ (per browser) | ✗ | localStorage; simplest real store |
 | **`podStore({ authFetch, base })`** | ✓ | ✓ | a Solid pod — WebID-owned, durable, portable |
 
-`podStore` writes one JSON document per identity into the owner's pod via an
-authenticated fetch (e.g. xlogin's `window.xlogin.authFetch`) — so clearing the
-browser doesn't lose it, and apps on different origins read the same pod under
-one WebID. It's *your* store, not the app's server.
+`podStore` writes one JSON document per identity into the owner's store via an
+authenticated fetch — so clearing the browser doesn't lose it, and apps on
+different origins read the same store under one identity. It's *your* store, not
+the app's server.
+
+### Authenticating the writes — `nip98.js`
+
+The write needs auth, and it's the **same key again**. `nip98Fetch()` wraps
+`fetch` with a [NIP-98](https://github.com/nostr-protocol/nips/blob/master/98.md)
+`Authorization` header — a signed kind-27235 nostr event proving the request came
+from the identity — and the store ACLs by that pubkey.
+
+```js
+import { podStore } from 'tidegate/store';   // (or 'tidegate/pod')
+import { nip98Fetch } from 'tidegate/nip98';
+
+const store = podStore({ authFetch: nip98Fetch(), base: 'https://…/tidegate/' });
+```
+
+So **one secp256k1 keypair** is the whole spine: it's the `did:nostr` identity,
+`keySigner` signs the trail transitions with it, `nip98Fetch` authenticates the
+writes with it, and the testnet4 committer (2b) will anchor with it. No key
+conversion, no second credential. (xlogin's `window.xlogin.authFetch` is a
+drop-in alternative when an app already runs xlogin.)
 
 ### Signing — `keys.js`
 
@@ -98,14 +118,16 @@ holds the commitment and enforces ordering; apps validate client-side. Portabili
 isn't a transfer between trails — it's **one identity-anchored trail multiple
 apps read and advance** under a shared token Profile.
 
-## Status — v0.0.1
+## Status — v0.0.4
 
-Local-ledger backend and a stub signer only: **no chain, no real crypto.** Enough
-to round-trip peg-in/peg-out and pin the state machine before any Bitcoin exists.
+The four-function API, the **StateStore seam** (`memStore` / `localStore` /
+`podStore`), real Schnorr signing (`keySigner`), and NIP-98 auth (`nip98Fetch`) —
+all on one nostr key. **No chain yet:** `noCommitter`, so the trail is off-chain
+but signed and durable. Enough to peg in and out of a real pod.
 
-- **2a (this):** the four-function API + local ledger. Round-trip proven.
-- **2b:** the real backend — BlockTrails, nostr-relay state, testnet4 anchor,
-  noskey signing, `confirmations: 0` (optimistic; a knob to harden later).
+- **2a:** the four-function API + local ledger. Round-trip proven.
+- **2b (here):** real signing + the store seam + pod persistence + NIP-98 auth.
+  Still `confirmations: 0` — the testnet4 committer is the remaining chain piece.
 - **3:** consumers — a game vault (Tideholm) and a tavern peg against the trail.
 
 ```
