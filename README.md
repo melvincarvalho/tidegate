@@ -29,14 +29,43 @@ tg.subscribe(did, (b) => …);         // live balance; returns unsubscribe
 `did` is the identity the trail belongs to. Amounts are positive integers of
 gold. A per-call `signer` overrides the one passed to `createTidegate`.
 
-## Two injected seams — one abstraction, two swaps
+## The seams — injected, so one abstraction covers every case
 
-The `backend` and `signer` are injected, so the same code covers:
+`createTidegate({ backend, signer })` — and the `backend` itself composes from a
+**StateStore** and a **Committer**:
 
-| Seam | Dev / test | Real |
+```js
+import { createTidegate, trailBackend, noCommitter } from 'tidegate';
+import { localStore } from 'tidegate/store';   // or podStore, memStore
+import { keySigner } from 'tidegate/keys';
+
+const tg = createTidegate({
+  backend: trailBackend({ store: localStore(), committer: noCommitter }),
+  signer: await keySigner(),
+});
+```
+
+| Seam | What it decides | Options |
 |---|---|---|
-| **backend** | `localBackend()` — in-memory trail, no chain | BlockTrails + nostr relays (state) + testnet4 (ordering) |
-| **signer** | `localSigner()` — stub, no crypto | `keySigner()` (see below), or later a NIP-07 signer (extension / xlogin's `window.nostr`) |
+| **store** | WHERE the trail's state lives | `memStore` · `localStore` · **`podStore`** · … |
+| **committer** | WHERE the commitment goes | `noCommitter` (off-chain trail) · testnet4 (later) |
+| **signer** | WHO attests to each transition | `localSigner` (stub) · **`keySigner`** (real, below) |
+
+### Where the trail lives — `store.js`, `pod.js`
+
+BlockTrails pins **order** to Bitcoin (the commitment); the **state** is the
+owner's to keep, anywhere they control. So the store is pluggable:
+
+| Store | Durable | Cross-device / origin | Notes |
+|---|---|---|---|
+| `memStore()` | ✗ | ✗ | isomorphic; tests + demo |
+| `localStore()` | ✗ (per browser) | ✗ | localStorage; simplest real store |
+| **`podStore({ authFetch, base })`** | ✓ | ✓ | a Solid pod — WebID-owned, durable, portable |
+
+`podStore` writes one JSON document per identity into the owner's pod via an
+authenticated fetch (e.g. xlogin's `window.xlogin.authFetch`) — so clearing the
+browser doesn't lose it, and apps on different origins read the same pod under
+one WebID. It's *your* store, not the app's server.
 
 ### Signing — `keys.js`
 

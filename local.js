@@ -1,44 +1,14 @@
-// Tidegate — the local-ledger backend + a stub signer. No chain, no relays, no
-// real crypto: an in-memory trail per identity, for dev and tests. It defines
-// the interface the real BlockTrails/nostr/testnet4 backend (2b) implements, so
-// swapping to the chain never touches the four-function API or its tests.
-//
-// Isomorphic: pure ESM, no environment globals.
+// Tidegate — the stub signer, plus a convenience in-memory backend. No chain,
+// no real crypto: for dev, tests, and the browser demo. Isomorphic.
 
-// An in-memory sealed-balance ledger keyed by identity. Each identity has a
-// linear trail of signed transitions; the balance is the tip's `next`.
+import { trailBackend } from './tidegate.js';
+import { memStore } from './store.js';
+
+// An in-memory backend = the StateStore seam with a memStore and no committer.
+// Kept as a one-liner for the demo and tests; new code composes
+// trailBackend({ store, committer }) directly (see store.js / pod.js).
 export function localBackend() {
-  const balances = new Map();  // did -> integer balance
-  const trails = new Map();    // did -> [transition]
-  const subs = new Map();      // did -> Set<cb>
-
-  return {
-    async balance(did) {
-      return balances.get(did) || 0;
-    },
-    // Append a signed transition and advance the tip. The real backend does the
-    // same after the P2TR spend that anchors this transition confirms (or, with
-    // confirmations: 0, is broadcast). Returns the new balance.
-    async append(did, t) {
-      balances.set(did, t.next);
-      const trail = trails.get(did) || [];
-      trail.push(t);
-      trails.set(did, trail);
-      const cbs = subs.get(did);
-      if (cbs) for (const cb of cbs) cb(t.next);
-      return t.next;
-    },
-    subscribe(did, cb) {
-      const set = subs.get(did) || new Set();
-      set.add(cb);
-      subs.set(did, set);
-      return () => set.delete(cb);
-    },
-    // Inspection, for tests: the full signed trail for an identity.
-    trail(did) {
-      return (trails.get(did) || []).slice();
-    },
-  };
+  return trailBackend({ store: memStore() });
 }
 
 // A stub signer that exercises the interface without real crypto. The browser

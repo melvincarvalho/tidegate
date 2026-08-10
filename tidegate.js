@@ -57,6 +57,59 @@ export function createTidegate({ backend, signer } = {}) {
   };
 }
 
+// Build a `backend` (what createTidegate consumes) by composing two seams:
+//
+//   • store     — WHERE the trail's state lives: the signed transition list.
+//                 local (localStorage), a Solid pod, memory, … (see store.js,
+//                 pod.js). The commitment pins order to Bitcoin; the state is
+//                 the owner's to keep, anywhere they control.
+//   • committer — WHERE the commitment goes: noCommitter (a pure off-chain
+//                 trail) now; a testnet4 BlockTrails committer later. Each
+//                 append is anchored and the commitment stamped onto the
+//                 transition before it's stored.
+//
+// The balance is simply the last transition's `next`. Stores are async (a pod
+// is a network call), so this is too. subscribe() is a no-op — a store can't
+// push; consumers re-read after an append (the four-function API awaits it).
+export function trailBackend({ store, committer } = {}) {
+  if (!store || typeof store.load !== 'function' || typeof store.save !== 'function') {
+    throw new Error('tidegate: a store with load()/save() is required');
+  }
+  const subs = new Map(); // did -> Set<cb>, notified on this instance's appends
+  return {
+    async balance(did) {
+      const trail = await store.load(did);
+      return trail.length ? trail[trail.length - 1].next : 0;
+    },
+    async append(did, t) {
+      const trail = await store.load(did);
+      if (committer && typeof committer.commit === 'function') {
+        t.commitment = await committer.commit(did, t);
+      }
+      trail.push(t);
+      await store.save(did, trail);
+      const set = subs.get(did);
+      if (set) for (const cb of set) cb(t.next);
+      return t.next;
+    },
+    // Fires on appends through THIS backend; a shared store changed elsewhere
+    // (another device writing the pod) isn't pushed — re-read to reconcile.
+    subscribe(did, cb) {
+      const set = subs.get(did) || new Set();
+      set.add(cb);
+      subs.set(did, set);
+      return () => set.delete(cb);
+    },
+    // Inspection: the full signed (and, with a committer, anchored) trail.
+    async trail(did) { return store.load(did); },
+  };
+}
+
+// The no-op committer: a pure off-chain trail, no anchoring. Swap for a
+// testnet4 BlockTrails committer when the chain layer lands (gated by the
+// `confirmations` knob).
+export const noCommitter = { async commit() { return null; } };
+
 // A stable byte string for the transition the signer attests to. v0.0.1 encodes
 // it plainly; the real backend hashes this with SHA-256 to derive the trail's
 // key tweak (tᵢ = SHA256(stateᵢ) mod n). TextEncoder is available in Node and
