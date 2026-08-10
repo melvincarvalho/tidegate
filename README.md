@@ -36,7 +36,25 @@ The `backend` and `signer` are injected, so the same code covers:
 | Seam | Dev / test | Real |
 |---|---|---|
 | **backend** | `localBackend()` — in-memory trail, no chain | BlockTrails + nostr relays (state) + testnet4 (ordering) |
-| **signer** | `localSigner()` — stub, no crypto | **noskey** in the browser; the `did:nostr` key signs the P2TR transition directly |
+| **signer** | `localSigner()` — stub, no crypto | `keySigner()` (see below), or later a NIP-07 signer (extension / xlogin's `window.nostr`) |
+
+### Signing — `keys.js`
+
+`keySigner()` signs each transition with **BIP340 Schnorr** using a nostr private
+key — the *same* key as your identity, the same primitive BlockTrails tweaks.
+PoC pattern lifted from [xlogin](https://github.com/melvincarvalho/xlogin)'s
+guest login: the key is **input once and kept in `localStorage`** (this browser
+only), and noble is imported from esm.sh.
+
+```js
+import { keySigner } from 'tidegate/keys';
+const signer = await keySigner();     // prompts for a 64-hex key once, then reuses it
+createTidegate({ backend, signer });
+```
+
+Browser-targeted (localStorage + esm.sh). Node tests use `localSigner`. Raw keys
+are just the easiest PoC — the `{ pubkey, sign }` shape is unchanged when this is
+swapped for a NIP-07 signer or a bunker later.
 
 That's also what keeps it **isomorphic**: a Node test wires the local backend
 and a stub signer; a browser wires the real ones. No Node/browser fork.

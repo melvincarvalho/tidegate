@@ -1,16 +1,24 @@
 {
   "name": "tidegate",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "A personal, identity-anchored sealed balance — peg gold in and out of a BlockTrail. Isomorphic (Node + browser), backend- and signer-swappable.",
   "type": "module",
   "main": "tidegate.js",
   "exports": {
     ".": "./tidegate.js",
-    "./local": "./local.js"
+    "./local": "./local.js",
+    "./keys": "./keys.js"
   },
   "scripts": {
     "test": "node test.js"
   },
-  "keywords": ["nostr", "bitcoin", "blocktrails", "did", "peg", "seal"],
+  "keywords": [
+    "nostr",
+    "bitcoin",
+    "blocktrails",
+    "did",
+    "peg",
+    "seal"
+  ],
   "license": "MIT"
 }
