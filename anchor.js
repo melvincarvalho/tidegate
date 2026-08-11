@@ -199,6 +199,7 @@ export async function anchor(did, trail, opts = {}) {
   return {
     network: 'tbtc4', seq: p.seq, state: p.state, tip: p.tip,
     address: p.nextAddress, txid, rawHex,
+    value: p.outputs[0].value, // the trail output's sats (vout 0) — for amount-checked verification
     explorer: `https://mempool.space/testnet4/tx/${txid}`,
   };
 }
