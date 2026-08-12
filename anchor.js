@@ -149,6 +149,98 @@ async function plan(did, trail, opts = {}) {
   return { did, hex, seq, state, tip: 'sha256:' + tipHex, priorStates, pubkeyBase, fromXonly, fromAddress, nextXonly, nextAddress, utxos, inputValue, feeRate, vsize, fee, outputs };
 }
 
+// ---- SWEEP: explicit closure -----------------------------------------------
+// The blocktrails spec treats closure as an ordinary spend ("optional
+// extensions" — top-up, transfer, explicit closure). A sweep spends the LAST
+// ANCHORED mark's output back to the identity's own base address ("send back
+// to self" — the same address that funded the genesis). ⚠ IRREVERSIBLE for
+// the chain: after a sweep no future anchor can spend forward; anchoring
+// again means a fresh genesis. The trail DOCUMENT is untouched — history
+// stays readable and verifiable forever; only the chain's ability to advance
+// ends. Same key recipe as anchor(); keyless preview first.
+
+async function sweepPlan(did, trail, opts = {}) {
+  const { bt } = await mods();
+  const hex = hexOf(did);
+  const priorStates = await priorStatesOf(did, trail);
+  if (priorStates.length === 0) throw new Error('tidegate: no anchored marks — nothing to sweep');
+  const pubkeyBase = bt.hexToBytes('02' + hex);
+  const fromXonly = bt.p2trXonly(bt.deriveChainedPublicKey(pubkeyBase, priorStates));
+  const { taprootAddress } = await import(new URL('./btc.js', import.meta.url).href);
+  const fromAddress = taprootAddress(bt.bytesToHex(fromXonly), 'testnet');
+  const destXonly = bt.hexToBytes(hex);            // self: the base convention (genesis funded from here)
+  const destAddress = taprootAddress(hex, 'testnet');
+
+  const utxos = (await getJson(`${API}/address/${fromAddress}/utxo`))
+    .filter((u) => u.status && u.status.confirmed)
+    .sort((a, b) => a.txid.localeCompare(b.txid) || a.vout - b.vout);
+  if (utxos.length === 0) throw new Error(`tidegate: nothing to sweep at ${fromAddress.slice(0, 12)}… — tip unconfirmed, or already swept`);
+  const inputValue = utxos.reduce((a, u) => a + u.value, 0);
+
+  let feeRate = Number(opts.feeRate);
+  if (!feeRate) {
+    try { feeRate = Math.max(1, Math.ceil((await getJson(`${API}/v1/fees/recommended`)).halfHourFee)); }
+    catch { feeRate = 1; }
+  }
+  const vsize = bt.estimateVsize(utxos.length, 1);
+  const fee = Math.ceil(vsize * feeRate);
+  const value = inputValue - fee;
+  if (value <= DUST) throw new Error(`tidegate: fee ${fee} sat would leave dust — nothing worth sweeping`);
+  return { hex, priorStates, pubkeyBase, fromXonly, fromAddress, destXonly, destAddress, utxos, inputValue, feeRate, vsize, fee, value };
+}
+
+// PREVIEW — keyless. What a sweep would do, exactly.
+export async function previewSweep(did, trail, opts = {}) {
+  const p = await sweepPlan(did, trail, opts);
+  return {
+    from: p.fromAddress, to: p.destAddress, inputValue: p.inputValue,
+    value: p.value, fee: p.fee, feeRate: p.feeRate,
+    anchoredMarks: p.priorStates.length, retires: true,
+  };
+}
+
+// SWEEP — sign with the nostr key (opts.key, or the localStorage key this
+// origin holds) and broadcast. Returns the closing txid.
+export async function sweep(did, trail, opts = {}) {
+  const { bt } = await mods();
+  const p = await sweepPlan(did, trail, opts);
+
+  const keyHex = String(opts.key || (typeof localStorage !== 'undefined' && localStorage.getItem(STORAGE_KEY)) || '').trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(keyHex)) throw new Error('tidegate: no nostr key — pass opts.key or store one first');
+  const priv = bt.hexToBytes(keyHex);
+
+  const realPub = bt.hexToBytes(bt.genesis(priv, 'parity-probe').pubkeyBase);
+  const basePriv = bt.adjustPrivateKeyForSigning(priv, realPub);
+  if (bt.bytesToHex(bt.p2trXonly(realPub)) !== p.hex) throw new Error('tidegate: the stored key does not match this identity — refusing to sign');
+
+  const chainedPriv = bt.deriveChainedPrivateKey(basePriv, p.priorStates);
+  const prevP = bt.deriveChainedPublicKey(p.pubkeyBase, p.priorStates);
+  const signingKey = bt.adjustPrivateKeyForSigning(chainedPriv, prevP);
+  const signingPub = bt.hexToBytes(bt.genesis(signingKey, 'parity-probe').pubkeyBase);
+  if (bt.bytesToHex(bt.p2trXonly(signingPub)) !== bt.bytesToHex(p.fromXonly)) {
+    throw new Error('tidegate: derived signing key does not sit on the swept output — refusing to sign');
+  }
+
+  const tx = bt.buildTransaction({
+    inputs: p.utxos.map((u) => ({ txid: u.txid, vout: u.vout, witnessProgram: p.fromXonly, amount: u.value })),
+    outputs: [{ witnessProgram: p.destXonly, value: p.value }],
+  });
+  const prevouts = p.utxos.map((u) => ({ txid: u.txid, vout: u.vout, witnessProgram: p.fromXonly, amount: BigInt(u.value) }));
+  const signed = bt.signTransaction(tx, p.utxos.map(() => signingKey), prevouts);
+  const rawHex = bt.bytesToHex(bt.serializeTransaction(signed));
+  const txid = bt.computeTxid(signed);
+
+  const r = await fetch(`${API}/tx`, { method: 'POST', body: rawHex });
+  const body = await r.text();
+  if (!r.ok) throw new Error(`tidegate: broadcast failed (${r.status}): ${body.slice(0, 120)}`);
+
+  return {
+    txid, rawHex, from: p.fromAddress, to: p.destAddress,
+    value: p.value, fee: p.fee, retired: true,
+    explorer: `https://mempool.space/testnet4/tx/${txid}`,
+  };
+}
+
 // PREVIEW — keyless. What an anchor would do, exactly.
 export async function previewAnchor(did, trail, opts = {}) {
   const p = await plan(did, trail, opts);
