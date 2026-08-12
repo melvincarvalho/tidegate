@@ -72,14 +72,30 @@ const stateString = (did, seq, tipHex) =>
 // Reconstruct the already-anchored state strings from the trail itself: every
 // entry stamped with a commitment marks an anchor at seq = its index + 1, whose
 // tip hashed the prefix up to and including it.
-export async function priorStatesOf(did, trail) {
+//
+// CHAINS (re-genesis): a swept chain cannot advance, so anchoring after a
+// sweep starts a fresh chain from the base address. Each commitment carries
+// `chain` (missing = 1, the first), and KEY ACCUMULATION restarts per chain —
+// only the current chain's states sum into the next address. The state
+// strings themselves never reset: seq keeps counting the whole trail, so the
+// committed content stays linear even when the key chain starts over. The
+// retirement spend on-chain is the delimiter a verifier can see.
+async function chainInfoOf(did, trail) {
+  const stamped = [];
+  for (let i = 0; i < trail.length; i++) if (trail[i] && trail[i].commitment) stamped.push(i);
+  const epoch = stamped.reduce((m, i) => Math.max(m, Math.trunc(Number(trail[i].commitment.chain)) || 1), 1);
   const states = [];
-  for (let i = 0; i < trail.length; i++) {
-    if (trail[i] && trail[i].commitment) {
-      states.push(stateString(did, i + 1, await sha256hex(canonicalTrail(trail.slice(0, i + 1)))));
-    }
+  let last = null;
+  for (const i of stamped) {
+    if ((Math.trunc(Number(trail[i].commitment.chain)) || 1) !== epoch) continue;
+    states.push(stateString(did, i + 1, await sha256hex(canonicalTrail(trail.slice(0, i + 1)))));
+    last = trail[i].commitment;
   }
-  return states;
+  return { epoch, states, last };
+}
+
+export async function priorStatesOf(did, trail) {
+  return (await chainInfoOf(did, trail)).states;
 }
 
 async function getJson(url) {
@@ -97,7 +113,23 @@ async function plan(did, trail, opts = {}) {
   const tipHex = await sha256hex(canonicalTrail(trail));
   const state = stateString(did, seq, tipHex);
 
-  const priorStates = await priorStatesOf(did, trail);
+  const info = await chainInfoOf(did, trail);
+  let priorStates = info.states;
+  let chain = info.epoch;
+  let regenesis = false;
+  if (priorStates.length) {
+    // Is the chain's tip output still alive? Spent WITHOUT a newer stamp means
+    // the chain was retired (an explicit-closure sweep) — detected from the
+    // chain itself, never reported: Bitcoin is the shared source of truth.
+    // Re-genesis: accumulate nothing, carve a fresh float from base, and stamp
+    // the new mark as chain n+1. (Edge: an advance that broadcast but was
+    // never stamped also reads as spent — re-genesis branches past it, and the
+    // orphaned mark simply never enters the projection.)
+    try {
+      const os = await getJson(`${API}/tx/${info.last.txid}/outspend/${info.last.vout || 0}`);
+      if (os && os.spent) { regenesis = true; chain = info.epoch + 1; priorStates = []; }
+    } catch { /* unknowable now — proceed as an advance; a swept chain will fail at the UTXO fetch anyway */ }
+  }
   if (trail[trail.length - 1].commitment) throw new Error('tidegate: this tip is already anchored');
 
   const pubkeyBase = bt.hexToBytes('02' + hex); // even-Y convention
@@ -146,7 +178,7 @@ async function plan(did, trail, opts = {}) {
     outputs = [{ xonly: nextXonly, address: nextAddress, value: forward, label: 'whole balance forward' }];
   }
 
-  return { did, hex, seq, state, tip: 'sha256:' + tipHex, priorStates, pubkeyBase, fromXonly, fromAddress, nextXonly, nextAddress, utxos, inputValue, feeRate, vsize, fee, outputs };
+  return { did, hex, seq, state, tip: 'sha256:' + tipHex, priorStates, chain, regenesis, pubkeyBase, fromXonly, fromAddress, nextXonly, nextAddress, utxos, inputValue, feeRate, vsize, fee, outputs };
 }
 
 // ---- SWEEP: explicit closure -----------------------------------------------
@@ -246,6 +278,7 @@ export async function previewAnchor(did, trail, opts = {}) {
   const p = await plan(did, trail, opts);
   return {
     seq: p.seq, state: p.state, tip: p.tip, anchorIndex: p.priorStates.length + 1,
+    chain: p.chain, regenesis: p.regenesis,
     from: p.fromAddress, inputValue: p.inputValue,
     outputs: p.outputs.map(({ address, value, label }) => ({ address, value, label })),
     fee: p.fee, feeRate: p.feeRate,
@@ -290,6 +323,7 @@ export async function anchor(did, trail, opts = {}) {
 
   return {
     network: 'tbtc4', seq: p.seq, state: p.state, tip: p.tip,
+    chain: p.chain, regenesis: p.regenesis,
     address: p.nextAddress, txid, rawHex,
     value: p.outputs[0].value, // the trail output's sats (vout 0) — for amount-checked verification
     explorer: `https://mempool.space/testnet4/tx/${txid}`,
