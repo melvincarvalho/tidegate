@@ -10,7 +10,11 @@
 //   * crypto  — the `blocktrails` reference library, browser entry via esm.sh
 //     (scalar tweak, chained derivation, BIP-341 sighash, Schnorr): a
 //     BlockTrails verifier accepts what we write.
-//   * network — mempool.space/testnet4 (UTXO fetch, fees, broadcast; CORS ok).
+//   * network — the chain's esplora API (UTXO fetch, fees, broadcast; CORS
+//     ok): txbt4, XBT's testnet4, by default — see NETWORKS. Every commitment
+//     names the chain it was written on, so a later anchor can tell when the
+//     chain under it has changed and start a fresh key chain (re-genesis)
+//     rather than try to spend an output that is not where it is looking.
 //
 // Conventions (identical to the CLI tool — the two must agree byte-for-byte):
 //   * state string, literal key order:
@@ -34,7 +38,17 @@
 
 const BT_URL = 'https://esm.sh/blocktrails@0.0.11/src/browser.js';
 const HASHES_URL = 'https://esm.sh/@noble/hashes@1.4.0/sha256';
-const API = 'https://mempool.space/testnet4/api';
+// The chains this committer can write to. txbt4 is XBT's testnet4 — the
+// BLAKE2b fork, which mempool.guide follows; tbtc4 is plain testnet4. They
+// share every block to 150,307 and part there. Pass opts.network to choose;
+// the default is the fleet's chain.
+export const NETWORKS = {
+  txbt4: { api: 'https://mempool.guide/testnet4/api', explorer: 'https://mempool.guide/testnet4' },
+  tbtc4: { api: 'https://mempool.space/testnet4/api', explorer: 'https://mempool.space/testnet4' },
+};
+export const DEFAULT_NETWORK = 'txbt4';
+const netOf = (opts) => { const n = NETWORKS[opts && opts.network] ? opts.network : DEFAULT_NETWORK; return { name: n, ...NETWORKS[n] }; };
+export const explorerFor = (network) => netOf({ network }).explorer;
 const APP = 'tideholm';
 const DUST = 546;
 const DEFAULT_FLOAT = 10000;
@@ -100,13 +114,14 @@ export async function priorStatesOf(did, trail) {
 
 async function getJson(url) {
   const r = await fetch(url);
-  if (!r.ok) throw new Error(`${url.replace(API, 'mempool')} → ${r.status}`);
+  if (!r.ok) throw new Error(`${url.replace(/^https:\/\/[^/]+\/[^/]+\/api/, 'explorer')} → ${r.status}`);
   return r.json();
 }
 
 // Everything both preview and anchor need, computed once. Keyless.
 async function plan(did, trail, opts = {}) {
   const { bt } = await mods();
+  const net = netOf(opts);
   const hex = hexOf(did);
   if (!Array.isArray(trail) || trail.length === 0) throw new Error('tidegate: empty trail — nothing to anchor');
   const seq = trail.length;
@@ -125,10 +140,16 @@ async function plan(did, trail, opts = {}) {
     // the new mark as chain n+1. (Edge: an advance that broadcast but was
     // never stamped also reads as spent — re-genesis branches past it, and the
     // orphaned mark simply never enters the projection.)
-    try {
-      const os = await getJson(`${API}/tx/${info.last.txid}/outspend/${info.last.vout || 0}`);
-      if (os && os.spent) { regenesis = true; chain = info.epoch + 1; priorStates = []; }
-    } catch { /* unknowable now — proceed as an advance; a swept chain will fail at the UTXO fetch anyway */ }
+    // A stamp made on another chain, or one whose tx this chain has never
+    // seen (404): the spine under us has moved — same answer as a sweep.
+    if (info.last.network && info.last.network !== net.name) { regenesis = true; chain = info.epoch + 1; priorStates = []; }
+    else {
+      try {
+        const r = await fetch(`${net.api}/tx/${info.last.txid}/outspend/${info.last.vout || 0}`);
+        if (r.status === 404) { regenesis = true; chain = info.epoch + 1; priorStates = []; }
+        else if (r.ok) { const os = await r.json(); if (os && os.spent) { regenesis = true; chain = info.epoch + 1; priorStates = []; } }
+      } catch { /* unknowable now — proceed as an advance; a swept chain will fail at the UTXO fetch anyway */ }
+    }
   }
   if (trail[trail.length - 1].commitment) throw new Error('tidegate: this tip is already anchored');
 
@@ -143,7 +164,7 @@ async function plan(did, trail, opts = {}) {
   const fromAddress = taprootAddress(bt.bytesToHex(fromXonly), 'testnet');
   const nextAddress = taprootAddress(bt.bytesToHex(nextXonly), 'testnet');
 
-  const utxos = (await getJson(`${API}/address/${fromAddress}/utxo`))
+  const utxos = (await getJson(`${net.api}/address/${fromAddress}/utxo`))
     .filter((u) => u.status && u.status.confirmed)
     .sort((a, b) => a.txid.localeCompare(b.txid) || a.vout - b.vout); // deterministic bytes
   if (utxos.length === 0) throw new Error(`tidegate: no confirmed fuel at ${fromAddress.slice(0, 12)}…`);
@@ -151,7 +172,7 @@ async function plan(did, trail, opts = {}) {
 
   let feeRate = Number(opts.feeRate);
   if (!feeRate) {
-    try { feeRate = Math.max(1, Math.ceil((await getJson(`${API}/v1/fees/recommended`)).halfHourFee)); }
+    try { feeRate = Math.max(1, Math.ceil((await getJson(`${net.api}/v1/fees/recommended`)).halfHourFee)); }
     catch { feeRate = 1; }
   }
 
@@ -194,6 +215,7 @@ async function plan(did, trail, opts = {}) {
 async function sweepPlan(did, trail, opts = {}) {
   const { bt } = await mods();
   const hex = hexOf(did);
+  const net = netOf(opts);
   const priorStates = await priorStatesOf(did, trail);
   if (priorStates.length === 0) throw new Error('tidegate: no anchored marks — nothing to sweep');
   const pubkeyBase = bt.hexToBytes('02' + hex);
@@ -203,7 +225,7 @@ async function sweepPlan(did, trail, opts = {}) {
   const destXonly = bt.hexToBytes(hex);            // self: the base convention (genesis funded from here)
   const destAddress = taprootAddress(hex, 'testnet');
 
-  const utxos = (await getJson(`${API}/address/${fromAddress}/utxo`))
+  const utxos = (await getJson(`${net.api}/address/${fromAddress}/utxo`))
     .filter((u) => u.status && u.status.confirmed)
     .sort((a, b) => a.txid.localeCompare(b.txid) || a.vout - b.vout);
   if (utxos.length === 0) throw new Error(`tidegate: nothing to sweep at ${fromAddress.slice(0, 12)}… — tip unconfirmed, or already swept`);
@@ -211,7 +233,7 @@ async function sweepPlan(did, trail, opts = {}) {
 
   let feeRate = Number(opts.feeRate);
   if (!feeRate) {
-    try { feeRate = Math.max(1, Math.ceil((await getJson(`${API}/v1/fees/recommended`)).halfHourFee)); }
+    try { feeRate = Math.max(1, Math.ceil((await getJson(`${net.api}/v1/fees/recommended`)).halfHourFee)); }
     catch { feeRate = 1; }
   }
   const vsize = bt.estimateVsize(utxos.length, 1);
@@ -236,6 +258,7 @@ export async function previewSweep(did, trail, opts = {}) {
 export async function sweep(did, trail, opts = {}) {
   const { bt } = await mods();
   const p = await sweepPlan(did, trail, opts);
+  const net = netOf(opts);
 
   const keyHex = String(opts.key || (typeof localStorage !== 'undefined' && localStorage.getItem(STORAGE_KEY)) || '').trim().toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(keyHex)) throw new Error('tidegate: no nostr key — pass opts.key or store one first');
@@ -262,14 +285,14 @@ export async function sweep(did, trail, opts = {}) {
   const rawHex = bt.bytesToHex(bt.serializeTransaction(signed));
   const txid = bt.computeTxid(signed);
 
-  const r = await fetch(`${API}/tx`, { method: 'POST', body: rawHex });
+  const r = await fetch(`${net.api}/tx`, { method: 'POST', body: rawHex });
   const body = await r.text();
   if (!r.ok) throw new Error(`tidegate: broadcast failed (${r.status}): ${body.slice(0, 120)}`);
 
   return {
     txid, rawHex, from: p.fromAddress, to: p.destAddress,
-    value: p.value, fee: p.fee, retired: true,
-    explorer: `https://mempool.space/testnet4/tx/${txid}`,
+    network: net.name, value: p.value, fee: p.fee, retired: true,
+    explorer: `${net.explorer}/tx/${txid}`,
   };
 }
 
@@ -290,6 +313,7 @@ export async function previewAnchor(did, trail, opts = {}) {
 export async function anchor(did, trail, opts = {}) {
   const { bt } = await mods();
   const p = await plan(did, trail, opts);
+  const net = netOf(opts);
 
   const keyHex = String(opts.key || (typeof localStorage !== 'undefined' && localStorage.getItem(STORAGE_KEY)) || '').trim().toLowerCase();
   if (!/^[0-9a-f]{64}$/.test(keyHex)) throw new Error('tidegate: no nostr key — peg once (or store the key) first');
@@ -317,15 +341,15 @@ export async function anchor(did, trail, opts = {}) {
   const rawHex = bt.bytesToHex(bt.serializeTransaction(signed));
   const txid = bt.computeTxid(signed);
 
-  const r = await fetch(`${API}/tx`, { method: 'POST', body: rawHex });
+  const r = await fetch(`${net.api}/tx`, { method: 'POST', body: rawHex });
   const body = await r.text();
   if (!r.ok) throw new Error(`tidegate: broadcast failed (${r.status}): ${body.slice(0, 120)}`);
 
   return {
-    network: 'tbtc4', seq: p.seq, state: p.state, tip: p.tip,
+    network: net.name, seq: p.seq, state: p.state, tip: p.tip,
     chain: p.chain, regenesis: p.regenesis,
     address: p.nextAddress, txid, rawHex,
     value: p.outputs[0].value, // the trail output's sats (vout 0) — for amount-checked verification
-    explorer: `https://mempool.space/testnet4/tx/${txid}`,
+    explorer: `${net.explorer}/tx/${txid}`,
   };
 }
